@@ -1,55 +1,4 @@
-// const express = require("express");
-// const mongoose = require("mongoose");   
-// const bycrypt = require("bcrypt");
-// const userModel = require("../models/user");
-// const router = express.Router();
-
-// router.post("/register", async(req,res) => {
-//     try{
-//         const {name, email, password} = req.body;
-//         const existingUser = await user.findOne({email});
-//         if(existingUser){
-//             return res.status(200).json({message: "User already exists", success: false});
-//         }
-//         const hashedPassword = await bycrypt.hash(password, 10);
-//         const newUser = new userModel({name, email, password: hashedPassword});
-//         await newUser.save();
-//         res.status(201).json({message: "User created successfully", success: true});
-//     }
-
-//     catch(error){
-//         console.log(error);
-//         res.status(500).json({message: "Error in registeration", success: false});
-//     }
-// });
-
-
-// router.post("/login", async(req,res) => {
-//     try{
-//         const {email, password} = req.body;
-//         const user = await user.findOne({email});
-//         if(!user){
-//             return res.status(200).json({message: "User does not exist", success: false});
-//         }
-
-//         const isPasswordValid = await bycrypt.compare(password, user.password);
-//         if(!isPasswordValid){
-//             return res.status(200).json({message: "Invalid email or password", success: false});
-//         }   
-
-//         res.status(200).json({message: "Login successful", success: true, data: user});
-//     }
-
-//     catch(error){
-//         console.log(error);
-//         res.status(500).json({message: "Error in login", success: false});
-//     }               
-// });
-
-// module.exports = router;
-
-
-
+const jwt = require("jsonwebtoken");
 const express = require("express");
 const bcrypt = require("bcrypt");
 const userModel = require("../models/user");
@@ -161,8 +110,17 @@ router.post("/login", async (req, res) => {
     }
 
     // Send user details without the password hash
+
+const token = jwt.sign(
+  { userId: existingUser._id },
+  process.env.JWT_SECRET,
+  { expiresIn: "1h" }
+);
+
+
     return res.status(200).json({
       success: true,
+      token: token,
       message: "Login successful",
       data: {
         id: existingUser._id,
