@@ -1,0 +1,813 @@
+diff --git a/backend/models/project.js b/backend/models/project.js
+index 2fb78d2..11b2c28 100644
+--- a/backend/models/project.js
++++ b/backend/models/project.js
+@@ -12,7 +12,11 @@ const projectschema = new mongoose.Schema({
+         type: mongoose.Schema.Types.ObjectId,
+         ref: "user",
+         required: true
+-    }       
++    },
++    pinned: {
++        type: Boolean,
++        default: false
++    }
+ });
+ 
+ const project = new mongoose.model("project",projectschema);
+diff --git a/backend/routes/project.js b/backend/routes/project.js
+index 2b32e47..7863311 100644
+--- a/backend/routes/project.js
++++ b/backend/routes/project.js
+@@ -1,6 +1,7 @@
+ 
+ const express = require("express");
+ const projectModel = require("../models/project");
++const taskModel = require("../models/task");
+ const authenticateToken = require("../middleware/auth");
+ 
+ const router = express.Router();
+@@ -43,9 +44,9 @@ router.post("/", authenticateToken, async (req, res) => {
+ // Get only the logged-in user's projects
+ router.get("/", authenticateToken, async (req, res) => {
+   try {
+-    const projects = await projectModel.find({
+-      userID: req.userId
+-    });
++    const projects = await projectModel
++      .find({ userID: req.userId })
++      .sort({ _id: 1 });
+ 
+     return res.status(200).json({
+       success: true,
+@@ -61,6 +62,52 @@ router.get("/", authenticateToken, async (req, res) => {
+   }
+ });
+ 
++// Rename and/or pin a project owned by the logged-in user
++router.patch("/:id", authenticateToken, async (req, res) => {
++  try {
++    const { name, pinned } = req.body;
++    const updates = {};
++
++    if (name !== undefined) {
++      if (typeof name !== "string" || !name.trim()) {
++        return res.status(400).json({ success: false, message: "Project name cannot be empty" });
++      }
++      updates.name = name.trim();
++    }
++
++    if (pinned !== undefined) {
++      if (typeof pinned !== "boolean") {
++        return res.status(400).json({ success: false, message: "pinned must be true or false" });
++      }
++      updates.pinned = pinned;
++    }
++
++    if (!Object.keys(updates).length) {
++      return res.status(400).json({ success: false, message: "Nothing to update" });
++    }
++
++    const project = await projectModel.findOneAndUpdate(
++      { _id: req.params.id, userID: req.userId },
++      updates,
++      { new: true, runValidators: true }
++    );
++
++    if (!project) {
++      return res.status(404).json({ success: false, message: "Project not found" });
++    }
++
++    return res.status(200).json({ success: true, message: "Project updated successfully", data: project });
++  } catch (error) {
++    console.error("Update project error:", error);
++
++    if (error.name === "CastError") {
++      return res.status(400).json({ success: false, message: "Invalid project ID" });
++    }
++
++    return res.status(500).json({ success: false, message: "Error updating project" });
++  }
++});
++
+ // Delete a project owned by the logged-in user
+ router.delete("/:id", authenticateToken, async (req, res) => {
+   try {
+@@ -76,6 +123,9 @@ router.delete("/:id", authenticateToken, async (req, res) => {
+       });
+     }
+ 
++    // Remove the project's tasks so none are left orphaned
++    await taskModel.deleteMany({ projectID: deletedProject._id });
++
+     return res.status(200).json({
+       success: true,
+       message: "Project deleted successfully"
+diff --git a/backend/routes/task.js b/backend/routes/task.js
+index 166a9a6..b4a6cb7 100644
+--- a/backend/routes/task.js
++++ b/backend/routes/task.js
+@@ -10,7 +10,7 @@ const router = express.Router();
+ // Create a task inside a project
+ router.post("/", authenticateToken, async (req, res) => {
+   try {
+-    const { name, projectID } = req.body;
++    const { name, projectID, status } = req.body;
+ 
+     if (!name || !projectID) {
+       return res.status(400).json({
+@@ -38,9 +38,17 @@ router.post("/", authenticateToken, async (req, res) => {
+       });
+     }
+ 
++    if (status !== undefined && !["pending", "in progress", "completed"].includes(status)) {
++      return res.status(400).json({
++        success: false,
++        message: "Invalid task status"
++      });
++    }
++
+     const newTask = new taskModel({
+       name,
+-      projectID
++      projectID,
++      ...(status !== undefined && { status })
+     });
+ 
+     await newTask.save();
+diff --git a/backend/server.js b/backend/server.js
+index cacf142..6ac6e73 100644
+--- a/backend/server.js
++++ b/backend/server.js
+@@ -13,7 +13,7 @@ app.use(cors());
+ app.use(express.json());
+ app.use("/api/auth", authRoute);
+ app.use("/api/projects", projectRoute);
+-app.use("api/tasks", taskRoute);
++app.use("/api/tasks", taskRoute); // was missing the leading "/"
+ require("dotenv").config();
+ 
+ // MOngoDB connection
+diff --git a/frontend/task/src/App.jsx b/frontend/task/src/App.jsx
+index 8938421..6aa5ec2 100644
+--- a/frontend/task/src/App.jsx
++++ b/frontend/task/src/App.jsx
+@@ -48,13 +48,15 @@
+ 
+ 
+ import { useState } from "react";
++import { getToken } from "./api";
+ import WelcomePage from "./pages/WelcomePage";
+ import SignInPage from "./pages/SignInPage";
+ import SignUpPage from "./pages/SignUpPage";
+ import HomePage from "./pages/HomePage";
+ 
+ export default function App() {
+-  const [page, setPage] = useState("welcome");
++  // Already signed in? Go straight to the homepage.
++  const [page, setPage] = useState(getToken() ? "home" : "welcome");
+ 
+   const Page = {
+     welcome: WelcomePage,
+diff --git a/frontend/task/src/api.js b/frontend/task/src/api.js
+new file mode 100644
+index 0000000..0ea0e0b
+--- /dev/null
++++ b/frontend/task/src/api.js
+@@ -0,0 +1,31 @@
++// Single place for API config. Adjust BASE / key names here if yours differ.
++const BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
++
++export const getToken = () => localStorage.getItem("token");
++export const getUser = () => {
++  try { return JSON.parse(localStorage.getItem("user")); } catch { return null; }
++};
++export const setSession = ({ token, user }) => {
++  if (token) localStorage.setItem("token", token);
++  if (user) localStorage.setItem("user", JSON.stringify(user));
++};
++export const clearSession = () => {
++  localStorage.removeItem("token");
++  localStorage.removeItem("user");
++};
++
++export async function api(path, { method = "GET", body } = {}) {
++  const token = getToken();
++  const res = await fetch(BASE + path, {
++    method,
++    headers: { "Content-Type": "application/json", ...(token && { Authorization: `Bearer ${token}` }) },
++    body: body ? JSON.stringify(body) : undefined,
++  });
++  const data = await res.json().catch(() => ({}));
++  if (!res.ok) {
++    const err = new Error(data.message || data.error || "Something went wrong. Please try again.");
++    err.status = res.status;
++    throw err;
++  }
++  return data.data !== undefined ? data.data : data; // backend wraps payloads as { success, data }
++}
+diff --git a/frontend/task/src/components/ConfirmDialog.jsx b/frontend/task/src/components/ConfirmDialog.jsx
+new file mode 100644
+index 0000000..36e4b67
+--- /dev/null
++++ b/frontend/task/src/components/ConfirmDialog.jsx
+@@ -0,0 +1,21 @@
++import { useRef } from "react";
++import useOutside from "./useOutside";
++
++export default function ConfirmDialog({ title, text, confirmLabel = "Confirm", busy, onConfirm, onCancel }) {
++  const ref = useRef(null);
++  useOutside(ref, onCancel);
++  return (
++    <div className="backdrop" style={{ zIndex: 60 }}>
++      <div className="dialog small" role="alertdialog" aria-modal="true" aria-labelledby="cd-title" ref={ref}>
++        <h2 id="cd-title">{title}</h2>
++        <p className="sub">{text}</p>
++        <div className="actions">
++          <button className="ghost" onClick={onCancel}>Cancel</button>
++          <button className="cta danger-btn" disabled={busy} onClick={onConfirm}>
++            {busy ? "Working…" : confirmLabel}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/task/src/components/Icon.jsx b/frontend/task/src/components/Icon.jsx
+new file mode 100644
+index 0000000..d28f639
+--- /dev/null
++++ b/frontend/task/src/components/Icon.jsx
+@@ -0,0 +1,23 @@
++const P = {
++  plus: "M12 5v14M5 12h14",
++  dots: "M12 5.5h.01M12 12h.01M12 18.5h.01",
++  expand: "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7",
++  shrink: "M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7",
++  back: "M19 12H5M12 19l-7-7",
++  pin: "M12 17v5M9 3h6l-1 6 3 3v2H7v-2l3-3z",
++  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
++  edit: "M4 20h4L19 9l-4-4L4 16z",
++  settings: "M4 6h10M18 6h2M4 12h2M10 12h10M4 18h12M14 4v4M8 10v4M18 16v4",
++  sun: "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5",
++  moon: "M20 14A8 8 0 0110 4a8 8 0 1010 10z",
++  logout: "M9 4H5v16h4M16 8l4 4-4 4M20 12H9",
++};
++
++export default function Icon({ n, size = 20 }) {
++  return (
++    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
++      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
++      <path d={P[n]} />
++    </svg>
++  );
++}
+diff --git a/frontend/task/src/components/ProfileMenu.jsx b/frontend/task/src/components/ProfileMenu.jsx
+new file mode 100644
+index 0000000..ca0b773
+--- /dev/null
++++ b/frontend/task/src/components/ProfileMenu.jsx
+@@ -0,0 +1,62 @@
++import { useRef, useState } from "react";
++import Icon from "./Icon";
++import useOutside from "./useOutside";
++
++function SettingsDialog({ user, theme, onTheme, onClose }) {
++  const ref = useRef(null);
++  useOutside(ref, onClose);
++  return (
++    <div className="backdrop">
++      <div className="dialog small" role="dialog" aria-modal="true" aria-labelledby="set-title" ref={ref}>
++        <h2 id="set-title">Settings</h2>
++        <p className="sub">{user?.name || "Your account"}{user?.email ? ` · ${user.email}` : ""}</p>
++        <span className="lbl">Theme</span>
++        <div className="seg">
++          {["dark", "light"].map((t) => (
++            <button key={t} className={theme === t ? "on" : ""} onClick={() => onTheme(t)}>
++              {t === "dark" ? "Dark" : "Light"}
++            </button>
++          ))}
++        </div>
++        <div className="actions"><button className="ghost" onClick={onClose}>Close</button></div>
++      </div>
++    </div>
++  );
++}
++
++export default function ProfileMenu({ user, theme, onTheme, onLogout }) {
++  const [open, setOpen] = useState(false);
++  const [settings, setSettings] = useState(false);
++  const ref = useRef(null);
++  useOutside(ref, () => setOpen(false), open);
++
++  return (
++    <>
++      <div className="menu-wrap" ref={ref}>
++        <button className="avatar" aria-label="Profile menu" aria-haspopup="menu"
++          aria-expanded={open} onClick={() => setOpen(!open)}>
++          {(user?.name || user?.email || "?")[0].toUpperCase()}
++        </button>
++        {open && (
++          <div className="dropdown left" role="menu">
++            <div className="info">
++              <strong>{user?.name || "Your account"}</strong>
++              {user?.email && <small>{user.email}</small>}
++            </div>
++            <button role="menuitem" onClick={() => { setOpen(false); setSettings(true); }}>
++              <Icon n="settings" size={16} />Settings
++            </button>
++            <button role="menuitem" onClick={() => onTheme(theme === "dark" ? "light" : "dark")}>
++              <Icon n={theme === "dark" ? "sun" : "moon"} size={16} />
++              {theme === "dark" ? "Light theme" : "Dark theme"}
++            </button>
++            <button role="menuitem" className="danger" onClick={onLogout}>
++              <Icon n="logout" size={16} />Log out
++            </button>
++          </div>
++        )}
++      </div>
++      {settings && <SettingsDialog user={user} theme={theme} onTheme={onTheme} onClose={() => setSettings(false)} />}
++    </>
++  );
++}
+diff --git a/frontend/task/src/components/ProjectCard.jsx b/frontend/task/src/components/ProjectCard.jsx
+new file mode 100644
+index 0000000..e016b62
+--- /dev/null
++++ b/frontend/task/src/components/ProjectCard.jsx
+@@ -0,0 +1,37 @@
++import { useRef, useState } from "react";
++import Icon from "./Icon";
++import useOutside from "./useOutside";
++
++export default function ProjectCard({ project, onOpen, onPin, onDelete }) {
++  const [open, setOpen] = useState(false);
++  const ref = useRef(null);
++  useOutside(ref, () => setOpen(false), open);
++
++  return (
++    <article
++      className="pcard"
++      tabIndex={0}
++      onClick={() => onOpen(project)}
++      onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && onOpen(project)}
++    >
++      {project.pinned && <span className="pinned" title="Pinned"><Icon n="pin" size={15} /></span>}
++      <div className="menu-wrap" ref={ref} onClick={(e) => e.stopPropagation()}>
++        <button className="icon-btn" aria-label="Project options" aria-haspopup="menu"
++          aria-expanded={open} onClick={() => setOpen(!open)}>
++          <Icon n="dots" />
++        </button>
++        {open && (
++          <div className="dropdown" role="menu">
++            <button role="menuitem" onClick={() => { setOpen(false); onPin(project); }}>
++              <Icon n="pin" size={16} />{project.pinned ? "Unpin" : "Pin"}
++            </button>
++            <button role="menuitem" className="danger" onClick={() => { setOpen(false); onDelete(project); }}>
++              <Icon n="trash" size={16} />Delete
++            </button>
++          </div>
++        )}
++      </div>
++      <h3>{project.name}</h3>
++    </article>
++  );
++}
+diff --git a/frontend/task/src/components/ProjectEditor.jsx b/frontend/task/src/components/ProjectEditor.jsx
+new file mode 100644
+index 0000000..4e78ec5
+--- /dev/null
++++ b/frontend/task/src/components/ProjectEditor.jsx
+@@ -0,0 +1,181 @@
++import { useEffect, useState } from "react";
++import { api } from "../api";
++import Field from "./Field";
++import Icon from "./Icon";
++import ConfirmDialog from "./ConfirmDialog";
++
++const uid = () => "tmp" + Math.random().toString(36).slice(2);
++
++// One editor, two views (modal / full page). State lives here, so expanding never loses work.
++// project === null  -> new project: tasks stay local until "Create project".
++// project !== null  -> existing project: task changes are saved to the API immediately.
++export default function ProjectEditor({ project, onClose, onSaved, onError }) {
++  const [expanded, setExpanded] = useState(false);
++  const [name, setName] = useState(project?.name || "");
++  const [tasks, setTasks] = useState([]);
++  const [loading, setLoading] = useState(!!project);
++  const [newTask, setNewTask] = useState("");
++  const [editing, setEditing] = useState(null);
++  const [err, setErr] = useState({});
++  const [busy, setBusy] = useState(false);
++  const [discard, setDiscard] = useState(false);
++
++  useEffect(() => {
++    if (!project) return;
++    api(`/tasks/project/${project._id}`).then(setTasks).catch(onError).finally(() => setLoading(false));
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [project?._id]);
++
++  const dirty = project ? name.trim() !== project.name : !!(name.trim() || tasks.length);
++  const requestClose = () => (dirty ? setDiscard(true) : onClose());
++
++  useEffect(() => {
++    if (discard) return;
++    const key = (e) => {
++      if (e.key !== "Escape") return;
++      if (expanded) setExpanded(false);
++      else requestClose();
++    };
++    document.addEventListener("keydown", key);
++    return () => document.removeEventListener("keydown", key);
++  });
++
++  const done = (t) => t.status === "completed";
++  const sorted = [...tasks.filter((t) => !done(t)), ...tasks.filter(done)];
++
++  const addTask = async () => {
++    const text = newTask.trim();
++    if (!text) return setErr({ task: "Enter a task name." });
++    setErr({});
++    if (!project) {
++      setTasks((x) => [...x, { _id: uid(), name: text, status: "pending" }]);
++      return setNewTask("");
++    }
++    try {
++      const t = await api("/tasks", { method: "POST", body: { name: text, projectID: project._id } });
++      setTasks((x) => [...x, t]);
++      setNewTask("");
++    } catch (e) { onError(e); }
++  };
++
++  const update = async (t, patch) => {
++    if (!project) return setTasks((x) => x.map((a) => (a._id === t._id ? { ...a, ...patch } : a)));
++    try {
++      const u = await api(`/tasks/${t._id}`, { method: "PATCH", body: patch });
++      setTasks((x) => x.map((a) => (a._id === t._id ? u : a)));
++    } catch (e) { onError(e); }
++  };
++
++  const remove = async (t) => {
++    if (!project) return setTasks((x) => x.filter((a) => a._id !== t._id));
++    try {
++      await api(`/tasks/${t._id}`, { method: "DELETE" });
++      setTasks((x) => x.filter((a) => a._id !== t._id));
++    } catch (e) { onError(e); }
++  };
++
++  const toggle = (t) => update(t, { status: done(t) ? "pending" : "completed" });
++
++  const commitEdit = (t) => {
++    const text = editing?.text.trim();
++    setEditing(null);
++    if (text && text !== t.name) update(t, { name: text });
++  };
++
++  const save = async () => {
++    if (!name.trim()) return setErr({ name: "Give your project a name." });
++    setBusy(true);
++    setErr({});
++    try {
++      if (!project) {
++        const p = await api("/projects", { method: "POST", body: { name: name.trim() } });
++        let failed = 0;
++        for (const t of tasks) {
++          try { await api("/tasks", { method: "POST", body: { name: t.name, status: t.status, projectID: p._id } }); }
++          catch { failed++; }
++        }
++        onSaved(p, failed ? `Project created, but ${failed} task(s) failed to save.` : "Project created.", failed ? "error" : "ok");
++      } else if (name.trim() !== project.name) {
++        const p = await api(`/projects/${project._id}`, { method: "PATCH", body: { name: name.trim() } });
++        onSaved(p, "Project updated.");
++      }
++      onClose();
++    } catch (e) {
++      if (e.status === 401) onError(e);
++      else setErr({ form: e.message });
++    } finally { setBusy(false); }
++  };
++
++  return (
++    <div className={"backdrop" + (expanded ? " full" : "")}
++      onMouseDown={(e) => e.target === e.currentTarget && !expanded && requestClose()}>
++      <section className={"dialog editor" + (expanded ? " full" : "")} role="dialog" aria-modal="true" aria-labelledby="ed-title">
++        <header className="ed-head">
++          <button className="icon-btn" aria-label={expanded ? "Back to window view" : "Close"}
++            onClick={expanded ? () => setExpanded(false) : requestClose}>
++            <Icon n="back" />
++          </button>
++          <h2 id="ed-title">{project ? "Project Details" : "New Project"}</h2>
++          <button className="icon-btn push" aria-label={expanded ? "Exit full page" : "Expand to full page"}
++            onClick={() => setExpanded(!expanded)}>
++            <Icon n={expanded ? "shrink" : "expand"} />
++          </button>
++        </header>
++
++        <div className="ed-body">
++          <Field label="Project name" value={name} onChange={(e) => setName(e.target.value)} error={err.name} />
++
++          <form className="add-row" onSubmit={(e) => { e.preventDefault(); addTask(); }}>
++            <div className={"box" + (err.task ? " bad" : "")}>
++              <input placeholder="Add a task" aria-label="New task" value={newTask}
++                onChange={(e) => setNewTask(e.target.value)} />
++            </div>
++            <button className="ghost with-icon"><Icon n="plus" size={18} />Add task</button>
++          </form>
++          {err.task && <small className="err">{err.task}</small>}
++
++          {loading ? (
++            <p className="muted">Loading tasks…</p>
++          ) : sorted.length === 0 ? (
++            <p className="muted">Tasks will appear here as you add them.</p>
++          ) : (
++            <ul className="tasks">
++              {sorted.map((t) => (
++                <li key={t._id} className={done(t) ? "done" : ""}>
++                  <input type="checkbox" checked={done(t)} onChange={() => toggle(t)}
++                    aria-label={`Mark "${t.name}" as ${done(t) ? "not completed" : "completed"}`} />
++                  {editing?.id === t._id ? (
++                    <input className="edit-in" autoFocus value={editing.text} aria-label="Edit task"
++                      onChange={(e) => setEditing({ ...editing, text: e.target.value })}
++                      onBlur={() => commitEdit(t)}
++                      onKeyDown={(e) => {
++                        if (e.key === "Enter") commitEdit(t);
++                        if (e.key === "Escape") { e.stopPropagation(); setEditing(null); }
++                      }} />
++                  ) : <span>{t.name}</span>}
++                  <button className="icon-btn" aria-label={`Edit "${t.name}"`}
++                    onClick={() => setEditing({ id: t._id, text: t.name })}><Icon n="edit" size={16} /></button>
++                  <button className="icon-btn" aria-label={`Delete "${t.name}"`}
++                    onClick={() => remove(t)}><Icon n="trash" size={16} /></button>
++                </li>
++              ))}
++            </ul>
++          )}
++
++          {err.form && <small className="err">{err.form}</small>}
++          <div className="actions">
++            <button className="ghost" onClick={requestClose}>{project ? "Close" : "Cancel"}</button>
++            <button className="cta" disabled={busy} onClick={save}>
++              {busy ? "Saving…" : project ? "Save changes" : "Create project"}
++            </button>
++          </div>
++        </div>
++      </section>
++
++      {discard && (
++        <ConfirmDialog title="Discard changes?" text="Your unsaved changes will be lost."
++          confirmLabel="Discard" onConfirm={onClose} onCancel={() => setDiscard(false)} />
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/task/src/components/useOutside.js b/frontend/task/src/components/useOutside.js
+new file mode 100644
+index 0000000..eb87b2f
+--- /dev/null
++++ b/frontend/task/src/components/useOutside.js
+@@ -0,0 +1,16 @@
++import { useEffect } from "react";
++
++// Calls fn when the user clicks outside ref or presses Escape.
++export default function useOutside(ref, fn, active = true) {
++  useEffect(() => {
++    if (!active) return;
++    const click = (e) => { if (!ref.current?.contains(e.target)) fn(); };
++    const key = (e) => { if (e.key === "Escape") fn(); };
++    document.addEventListener("mousedown", click);
++    document.addEventListener("keydown", key);
++    return () => {
++      document.removeEventListener("mousedown", click);
++      document.removeEventListener("keydown", key);
++    };
++  }, [ref, fn, active]);
++}
+diff --git a/frontend/task/src/main.jsx b/frontend/task/src/main.jsx
+index a20fc3d..6b59c36 100644
+--- a/frontend/task/src/main.jsx
++++ b/frontend/task/src/main.jsx
+@@ -1,6 +1,7 @@
+ import { StrictMode } from 'react'
+ import { createRoot } from 'react-dom/client'
+ import './styles/nuggets.css'
++import './styles/home.css'
+ import App from './App.jsx'
+ 
+ createRoot(document.getElementById('root')).render(
+diff --git a/frontend/task/src/pages/HomePage.jsx b/frontend/task/src/pages/HomePage.jsx
+index c99f747..fc44427 100644
+--- a/frontend/task/src/pages/HomePage.jsx
++++ b/frontend/task/src/pages/HomePage.jsx
+@@ -1,3 +1,110 @@
+-export default function HomePage() {
+-  return <div></div>;
+-}
+\ No newline at end of file
++import { useCallback, useEffect, useState } from "react";
++import { api, clearSession, getToken, getUser } from "../api";
++import Icon from "../components/Icon";
++import ProfileMenu from "../components/ProfileMenu";
++import ProjectCard from "../components/ProjectCard";
++import ProjectEditor from "../components/ProjectEditor";
++import ConfirmDialog from "../components/ConfirmDialog";
++
++export default function HomePage({ onNavigate = () => {} }) {
++  const [projects, setProjects] = useState([]);
++  const [loading, setLoading] = useState(true);
++  const [loadErr, setLoadErr] = useState("");
++  const [editor, setEditor] = useState(null); // { project: obj | null }
++  const [toDelete, setToDelete] = useState(null);
++  const [deleting, setDeleting] = useState(false);
++  const [toast, setToast] = useState(null);
++  const user = getUser();
++  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
++
++  const notify = useCallback((text, type = "ok") => setToast({ text, type, id: Date.now() }), []);
++  const logout = useCallback(() => { clearSession(); onNavigate("signin"); }, [onNavigate]);
++  const fail = useCallback((e) => (e.status === 401 ? logout() : notify(e.message, "error")), [logout, notify]);
++
++  useEffect(() => {
++    if (!getToken()) return logout();
++    api("/projects").then(setProjects)
++      .catch((e) => (e.status === 401 ? logout() : setLoadErr(e.message)))
++      .finally(() => setLoading(false));
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  useEffect(() => { localStorage.setItem("theme", theme); }, [theme]);
++  useEffect(() => {
++    if (!toast) return;
++    const t = setTimeout(() => setToast(null), 3500);
++    return () => clearTimeout(t);
++  }, [toast]);
++
++  const onSaved = (p, msg, type) => {
++    setProjects((x) => (x.some((a) => a._id === p._id) ? x.map((a) => (a._id === p._id ? p : a)) : [...x, p]));
++    notify(msg, type);
++  };
++
++  const pin = async (p) => {
++    try {
++      const u = await api(`/projects/${p._id}`, { method: "PATCH", body: { pinned: !p.pinned } });
++      setProjects((x) => x.map((a) => (a._id === u._id ? u : a)));
++      notify(u.pinned ? "Project pinned." : "Project unpinned.");
++    } catch (e) { fail(e); }
++  };
++
++  const confirmDelete = async () => {
++    setDeleting(true);
++    try {
++      await api(`/projects/${toDelete._id}`, { method: "DELETE" });
++      setProjects((x) => x.filter((a) => a._id !== toDelete._id));
++      notify("Project deleted.");
++      setToDelete(null);
++    } catch (e) { fail(e); } finally { setDeleting(false); }
++  };
++
++  // Pinned first; original (server) order kept inside each group.
++  const ordered = [...projects.filter((p) => p.pinned), ...projects.filter((p) => !p.pinned)];
++
++  return (
++    <div className="home" data-theme={theme}>
++      <div className="home-wrap">
++        <header className="home-head">
++          <ProfileMenu user={user} theme={theme} onTheme={setTheme} onLogout={logout} />
++          <h1>Your Projects</h1>
++          <button className="btn-new" aria-label="New Project" onClick={() => setEditor({ project: null })}>
++            <Icon n="plus" size={18} /><span>New Project</span>
++          </button>
++        </header>
++
++        {loading ? (
++          <p className="muted">Loading your projects…</p>
++        ) : loadErr ? (
++          <div className="empty"><p>{loadErr}</p></div>
++        ) : ordered.length === 0 ? (
++          <div className="empty">
++            <h2>No projects yet</h2>
++            <p className="muted">Create your first project and start adding tasks.</p>
++            <button className="btn-new" onClick={() => setEditor({ project: null })}>
++              <Icon n="plus" size={18} />Create your first project
++            </button>
++          </div>
++        ) : (
++          <div className="grid">
++            {ordered.map((p) => (
++              <ProjectCard key={p._id} project={p} onOpen={(proj) => setEditor({ project: proj })}
++                onPin={pin} onDelete={setToDelete} />
++            ))}
++          </div>
++        )}
++      </div>
++
++      {editor && (
++        <ProjectEditor key={editor.project?._id || "new"} project={editor.project}
++          onClose={() => setEditor(null)} onSaved={onSaved} onError={fail} />
++      )}
++      {toDelete && (
++        <ConfirmDialog title="Delete project?" confirmLabel="Delete" busy={deleting}
++          text={`"${toDelete.name}" and all of its tasks will be permanently deleted.`}
++          onConfirm={confirmDelete} onCancel={() => setToDelete(null)} />
++      )}
++      {toast && <div className={"toast " + toast.type} role="status">{toast.text}</div>}
++    </div>
++  );
++}
+diff --git a/frontend/task/src/pages/SignInPage.jsx b/frontend/task/src/pages/SignInPage.jsx
+index 39b351e..58d3fab 100644
+--- a/frontend/task/src/pages/SignInPage.jsx
++++ b/frontend/task/src/pages/SignInPage.jsx
+@@ -2,6 +2,7 @@
+ import { useState } from "react";
+ import AuthAside from "../components/AuthAside";
+ import Field from "../components/Field";
++import { setSession } from "../api";
+ 
+ export default function SignInPage({ onNavigate = () => {} }) {
+   const [f, setF] = useState({
+@@ -57,6 +58,8 @@ export default function SignInPage({ onNavigate = () => {} }) {
+         );
+       }
+ 
++      setSession({ token: result.token, user: result.data });
++
+       // Navigate to Home only after successful login.
+       setF({
+         email: "",
+diff --git a/frontend/task/src/styles/home.css b/frontend/task/src/styles/home.css
+new file mode 100644
+index 0000000..7bd3072
+--- /dev/null
++++ b/frontend/task/src/styles/home.css
+@@ -0,0 +1,71 @@
++.home{min-height:100dvh;background:var(--ink);color:var(--ivory);padding:max(1.25rem,env(safe-area-inset-top)) 1.25rem 3rem;--on-gold:#17131f}
++.home[data-theme=light]{--ink:#f7f3ea;--plum:#fffdf8;--line:#ddd3c0;--ivory:#241c31;--mute:#6f6680;--err:#c4402f}
++.home .cta{color:var(--on-gold)}
++.home-wrap{max-width:1100px;margin:0 auto}
++.home-head{display:flex;align-items:center;gap:1rem;margin-bottom:1.75rem}
++.home-head h1{flex:1;font:600 clamp(1.4rem,4vw,2rem)/1.1 var(--serif);letter-spacing:-.02em}
++.muted{color:var(--mute)}
++.avatar{width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--plum);color:var(--gold);font:600 1.1rem var(--serif);cursor:pointer;transition:.25s}
++.avatar:hover{border-color:var(--gold)}
++.btn-new{display:inline-flex;align-items:center;gap:.5rem;padding:.7rem 1.2rem;border:0;border-radius:999px;background:var(--gold);color:var(--on-gold);font-weight:600;cursor:pointer;transition:.25s}
++.btn-new:hover{background:#f3c765;transform:translateY(-2px)}
++@media(max-width:440px){.home-head .btn-new span{display:none}.home-head .btn-new{padding:.75rem}}
++
++.grid{display:grid;gap:1rem;grid-template-columns:1fr}
++@media(min-width:600px){.grid{grid-template-columns:repeat(2,1fr)}}
++@media(min-width:960px){.grid{grid-template-columns:repeat(3,1fr)}}
++.pcard{position:relative;min-height:140px;display:flex;align-items:flex-end;justify-content:center;text-align:center;padding:1.25rem 1.25rem 1.5rem;border:1px solid var(--line);border-radius:22px;background:var(--plum);cursor:pointer;transition:.25s}
++.pcard:hover{border-color:var(--gold);transform:translateY(-3px)}
++.pcard h3{font:600 1.15rem var(--serif);overflow-wrap:anywhere}
++.pinned{position:absolute;top:1rem;left:1.1rem;color:var(--gold)}
++.menu-wrap{position:relative}
++.pcard .menu-wrap{position:absolute;top:.5rem;right:.5rem}
++.icon-btn{display:grid;place-items:center;width:34px;height:34px;border:0;border-radius:50%;background:none;color:var(--mute);cursor:pointer;transition:.2s;flex:none}
++.icon-btn:hover{color:var(--gold);background:rgba(232,182,76,.12)}
++.dropdown{position:absolute;right:0;top:calc(100% + 6px);min-width:180px;padding:.35rem;background:var(--plum);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 30px rgba(0,0,0,.35);z-index:30;text-align:left}
++.dropdown.left{left:0;right:auto}
++.dropdown button{display:flex;align-items:center;gap:.6rem;width:100%;padding:.6rem .8rem;border:0;border-radius:10px;background:none;cursor:pointer;text-align:left}
++.dropdown button:hover{background:rgba(232,182,76,.12)}
++.dropdown .danger{color:var(--err)}
++.dropdown .info{display:grid;padding:.6rem .8rem;border-bottom:1px solid var(--line);margin-bottom:.3rem}
++.dropdown .info small{color:var(--mute);overflow-wrap:anywhere}
++.empty{text-align:center;padding:4rem 1.25rem;border:1px dashed var(--line);border-radius:22px;display:grid;gap:1rem;justify-items:center}
++.empty h2{font:600 1.5rem var(--serif)}
++
++.backdrop{position:fixed;inset:0;z-index:40;display:grid;place-items:center;padding:1rem;background:rgba(10,7,16,.65);backdrop-filter:blur(4px);animation:fade .2s}
++.backdrop.full{padding:0;background:var(--ink)}
++@keyframes fade{from{opacity:0}}
++@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.98)}}
++.dialog{width:min(100%,560px);max-height:calc(100dvh - 2rem);overflow:auto;background:var(--plum);color:var(--ivory);border:1px solid var(--line);border-radius:26px;padding:1.5rem;animation:pop .25s}
++.dialog.small{width:min(100%,400px)}
++.dialog h2{font:600 1.35rem var(--serif)}
++.dialog .sub{margin:.4rem 0 1.25rem}
++.dialog.full{width:100%;max-width:none;height:100dvh;max-height:none;border:0;border-radius:0;padding:max(1.5rem,env(safe-area-inset-top)) clamp(1.25rem,6vw,4rem) 1.5rem}
++.dialog.full .ed-body{max-width:760px;margin:0 auto}
++.dialog.full .ed-head{max-width:760px;margin:0 auto 1rem}
++.ed-head{display:flex;align-items:center;gap:.6rem;margin-bottom:1rem}
++.ed-head h2{flex:1}
++.ed-body{display:grid;gap:.4rem}
++.ed-body>*{min-width:0}
++.add-row{display:flex;gap:.6rem;align-items:flex-start;margin:.3rem 0}
++.add-row .box{flex:1}
++.ghost{padding:.8rem 1.3rem;border:1px solid var(--line);border-radius:999px;background:none;cursor:pointer;transition:.2s;white-space:nowrap}
++.ghost:hover{border-color:var(--gold);color:var(--gold)}
++.with-icon{display:inline-flex;align-items:center;gap:.4rem}
++@media(max-width:440px){.add-row{flex-direction:column;align-items:stretch}}
++.tasks{list-style:none;padding:0;display:grid;gap:.4rem;margin-top:.5rem}
++.tasks li{display:flex;align-items:center;gap:.6rem;padding:.4rem .5rem .4rem .9rem;border:1px solid var(--line);border-radius:14px;background:var(--ink)}
++.tasks li span,.edit-in{flex:1;min-width:0;overflow-wrap:anywhere}
++.tasks li.done span{text-decoration:line-through;color:var(--mute)}
++.tasks input[type=checkbox]{accent-color:var(--gold);width:18px;height:18px;flex:none}
++.edit-in{background:none;border:0;border-bottom:1px solid var(--gold);outline:0;padding:.15rem 0}
++.actions{display:flex;justify-content:flex-end;gap:.75rem;margin-top:1rem}
++.actions .cta{width:auto;margin:0;padding:.8rem 1.5rem}
++.cta.danger-btn{background:var(--err);color:#fff}
++.lbl{display:block;font-size:.85rem;color:var(--mute);margin:0 0 .5rem .5rem}
++.seg{display:flex;padding:4px;border:1px solid var(--line);border-radius:999px}
++.seg button{flex:1;padding:.6rem;border:0;border-radius:999px;background:none;cursor:pointer}
++.seg .on{background:var(--gold);color:var(--on-gold);font-weight:600}
++.toast{position:fixed;left:50%;bottom:1.5rem;translate:-50% 0;z-index:80;max-width:calc(100% - 2rem);padding:.8rem 1.3rem;border-radius:999px;background:var(--gold);color:var(--on-gold);font-weight:600;animation:pop .25s}
++.toast.error{background:var(--err);color:#fff}
++.error{color:var(--err);font-size:.9rem;margin:.2rem 0 .6rem .6rem}
