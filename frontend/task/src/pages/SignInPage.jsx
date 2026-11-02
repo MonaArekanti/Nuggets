@@ -1,7 +1,7 @@
-
 import { useState } from "react";
 import AuthAside from "../components/AuthAside";
 import Field from "../components/Field";
+import { setSession } from "../api";
 
 export default function SignInPage({ onNavigate = () => {} }) {
   const [f, setF] = useState({
@@ -57,6 +57,8 @@ export default function SignInPage({ onNavigate = () => {} }) {
         );
       }
 
+      setSession({ token: result.token, user: result.data });
+
       // Navigate to Home only after successful login.
       setF({
         email: "",
@@ -95,12 +97,7 @@ export default function SignInPage({ onNavigate = () => {} }) {
             ← Back
           </button>
 
-          <span className="brand">Nuggets</span>
-
           <h1>Welcome back</h1>
-          <p className="sub">
-            Sign in to pick up where you left off.
-          </p>
 
           <Field
             label="Email"

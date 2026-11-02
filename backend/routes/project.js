@@ -1,6 +1,7 @@
 
 const express = require("express");
 const projectModel = require("../models/project");
+const taskModel = require("../models/task");
 const authenticateToken = require("../middleware/auth");
 
 const router = express.Router();
@@ -43,9 +44,9 @@ router.post("/", authenticateToken, async (req, res) => {
 // Get only the logged-in user's projects
 router.get("/", authenticateToken, async (req, res) => {
   try {
-    const projects = await projectModel.find({
-      userID: req.userId
-    });
+    const projects = await projectModel
+      .find({ userID: req.userId })
+      .sort({ _id: 1 });
 
     return res.status(200).json({
       success: true,
@@ -58,6 +59,52 @@ router.get("/", authenticateToken, async (req, res) => {
       success: false,
       message: "Error fetching projects"
     });
+  }
+});
+
+// Rename and/or pin a project owned by the logged-in user
+router.patch("/:id", authenticateToken, async (req, res) => {
+  try {
+    const { name, pinned } = req.body;
+    const updates = {};
+
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ success: false, message: "Project name cannot be empty" });
+      }
+      updates.name = name.trim();
+    }
+
+    if (pinned !== undefined) {
+      if (typeof pinned !== "boolean") {
+        return res.status(400).json({ success: false, message: "pinned must be true or false" });
+      }
+      updates.pinned = pinned;
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ success: false, message: "Nothing to update" });
+    }
+
+    const project = await projectModel.findOneAndUpdate(
+      { _id: req.params.id, userID: req.userId },
+      updates,
+      { new: true, runValidators: true }
+    );
+
+    if (!project) {
+      return res.status(404).json({ success: false, message: "Project not found" });
+    }
+
+    return res.status(200).json({ success: true, message: "Project updated successfully", data: project });
+  } catch (error) {
+    console.error("Update project error:", error);
+
+    if (error.name === "CastError") {
+      return res.status(400).json({ success: false, message: "Invalid project ID" });
+    }
+
+    return res.status(500).json({ success: false, message: "Error updating project" });
   }
 });
 
@@ -75,6 +122,9 @@ router.delete("/:id", authenticateToken, async (req, res) => {
         message: "Project not found"
       });
     }
+
+    // Remove the project's tasks so none are left orphaned
+    await taskModel.deleteMany({ projectID: deletedProject._id });
 
     return res.status(200).json({
       success: true,

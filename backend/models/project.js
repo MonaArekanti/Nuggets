@@ -12,7 +12,11 @@ const projectschema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: "user",
         required: true
-    }       
+    },
+    pinned: {
+        type: Boolean,
+        default: false
+    }
 });
 
 const project = new mongoose.model("project",projectschema);

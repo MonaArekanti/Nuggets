@@ -36,10 +36,10 @@ background:radial-gradient(ellipse 60% 50% at 50% 38%,rgba(232,182,76,.16),trans
 .aside .nug+.nug{width:70px;height:60px;right:34%;bottom:40%;animation-delay:-4s}
 .aside h2{font:400 clamp(1.8rem,3vw,2.6rem)/1.2 var(--serif);max-width:14ch}
 .brand{font:600 1.5rem var(--serif)}
-.main{display:grid;place-items:center;padding:2rem 1.25rem}
+.main{display:grid;place-items:start center;padding:clamp(2rem,10vh,5rem) 1.25rem 2rem}
 .panel{width:min(100%,400px)}
 .panel .brand{display:block;margin-bottom:2.5rem}
-.panel h1{font:600 clamp(2rem,6vw,2.6rem)/1.1 var(--serif);letter-spacing:-.02em}
+.panel h1{font:600 clamp(2rem,6vw,2.6rem)/1.1 var(--serif);letter-spacing:-.02em;margin-bottom:2rem}
 .sub{color:var(--mute);margin:.5rem 0 2rem}
 .back{background:none;border:0;color:var(--mute);cursor:pointer;margin-bottom:1.5rem;padding:.25rem 0;font-size:.95rem}
 .back:hover{color:var(--gold)}

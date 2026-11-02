@@ -48,13 +48,15 @@
 
 
 import { useState } from "react";
+import { getToken } from "./api";
 import WelcomePage from "./pages/WelcomePage";
 import SignInPage from "./pages/SignInPage";
 import SignUpPage from "./pages/SignUpPage";
 import HomePage from "./pages/HomePage";
 
 export default function App() {
-  const [page, setPage] = useState("welcome");
+  // Already signed in? Go straight to the homepage.
+  const [page, setPage] = useState(getToken() ? "home" : "welcome");
 
   const Page = {
     welcome: WelcomePage,

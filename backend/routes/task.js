@@ -10,7 +10,7 @@ const router = express.Router();
 // Create a task inside a project
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { name, projectID } = req.body;
+    const { name, projectID, status } = req.body;
 
     if (!name || !projectID) {
       return res.status(400).json({
@@ -38,9 +38,17 @@ router.post("/", authenticateToken, async (req, res) => {
       });
     }
 
+    if (status !== undefined && !["pending", "in progress", "completed"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid task status"
+      });
+    }
+
     const newTask = new taskModel({
       name,
-      projectID
+      projectID,
+      ...(status !== undefined && { status })
     });
 
     await newTask.save();
